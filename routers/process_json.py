@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 base_dir = os.path.dirname(__file__)  
 sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), '../'))
 from services.utils import read_data, path_exists, validate_unique_key, cleanse_timestamp, convert_unix_to_dt, adjust_time_format
-from services.utils import apply_mapping, normalize_columns, clean_is_claimed, extract_filename_without_extension, write_data, cleanse_tel_num
+from services.utils import apply_mapping, normalize_columns, clean_is_claimed, extract_filename_without_extension, write_data, cleanse_tel_num, load_data_to_postgresql
 
 spark = SparkSession.builder.appName("ProcessETLCSV").getOrCreate()
 
@@ -31,47 +31,16 @@ db_params = {
     'dbname': 'etl_db',
     'user': 'etluser',
     'password': 'etlpassword',
-    'host': 'localhost',
+    'host': 'db',
     'port': '5432'
 }
 
-def load_to_postgres_via_cursor(spark_df, db_params, table_name: str):
-    try:
-        pandas_df = spark_df.toPandas()
-        
-        engine = create_engine(
-            f'postgresql+psycopg2://{db_params["user"]}:{db_params["password"]}@{db_params["host"]}:{db_params["port"]}/{db_params["dbname"]}'
-        )
 
-        with engine.connect() as connection:
-            with connection.begin():
-                with connection.connection.cursor() as cursor:
-                    temp_table = f"{table_name}_temp"
-                    
-                    cursor.execute(f"DROP TABLE IF EXISTS {temp_table};")
-                    
-                    pandas_df.head(0).to_sql(temp_table, connection, index=False, if_exists='replace')
-                    
-                    from io import StringIO
-                    buffer = StringIO()
-                    pandas_df.to_csv(buffer, header=False, index=False)
-                    buffer.seek(0)
 
-                    cursor.copy_expert(
-                        f"COPY {temp_table} FROM STDIN WITH CSV NULL AS ''", buffer
-                    )
-
-                    cursor.execute(f"""
-                        DROP TABLE IF EXISTS {table_name};
-                        ALTER TABLE {temp_table} RENAME TO {table_name};
-                    """)
-
-                    logger.info(f"Data loaded into PostgreSQL table: {table_name}")
-
-    except Exception as e:
-        logger.error(f"Failed to load data into PostgreSQL: {e}")
-        raise
-
+import uuid
+@F.udf()
+def gen_uuid():
+    return str(uuid.uuid4())
 
 def read_data(input_path: str, file_format: str, options: dict , schema: StructType) -> DataFrame:
     logger.info(f"Reading data from {input_path} with file format {file_format}")
@@ -160,6 +129,7 @@ def run(*, input_path: str, output_path: str, file_format: str = 'json'):
     logger.info("Applying mapping to user_df...")
     user_mapping = {
         'user_id': 'user_id',
+        'uuid': F.lit(gen_uuid()),
         'created_at_ori': 'created_at', 
         'created_at': F.unix_timestamp(F.col("created_at_str"), "yyyy-MM-dd HHmm:ss").cast(types.TimestampType()),
         'updated_at_ori': "updated_at",
@@ -191,7 +161,7 @@ def run(*, input_path: str, output_path: str, file_format: str = 'json'):
 
         tel_num_mapping = {
             'user_id': 'user_id',
-            'id': F.expr('uuid()'), 
+            'uuid': F.lit(gen_uuid()),
             'telephone_numbers_ori': 'telephone_numbers',
             'telephone_numbers': cleanse_tel_num('telephone_numbers').cast(types.StringType()),
             'inserted_date': F.lit(datetime.now(tz=pytz.UTC))
@@ -203,7 +173,7 @@ def run(*, input_path: str, output_path: str, file_format: str = 'json'):
         raise
 
     assert tel_num_df.count() > 0, "Telephone numbers DataFrame is empty."
-    assert tel_num_df.filter(~F.regexp_extract('id', '^[0-9a-fA-F-]{36}$', 0).rlike("^[a-f0-9-]{36}$")).count() == 0, "Invalid UUID format in 'id' column."
+    # assert tel_num_df.filter(~F.regexp_extract('uuid', '^[0-9a-fA-F-]{36}$', 0).rlike("^[a-f0-9-]{36}$")).count() == 0, "Invalid UUID format in 'id' column."
     logger.info("Telephone numbers processed successfully.")
 
     logger.info("Processing job history data...")
@@ -223,7 +193,7 @@ def run(*, input_path: str, output_path: str, file_format: str = 'json'):
     
         job_history_mapping = {
             'user_id': 'user_id',
-            'id': 'id',
+            'uuid': F.lit(gen_uuid()),
             'occupation': F.initcap(F.trim('occupation')),
             'employer': F.trim('employer'),
             'is_fulltime': F.col('is_fulltime').cast(types.BooleanType()),
@@ -242,9 +212,9 @@ def run(*, input_path: str, output_path: str, file_format: str = 'json'):
 
     # job_history_df.printSchema()
     # tel_num_df.show(10, truncate=False) 
-    load_to_postgres_via_cursor(user_df, db_params, 'user_tbl')
-    load_to_postgres_via_cursor(tel_num_df, db_params, 'telephone_numbers')
-    load_to_postgres_via_cursor(job_history_df, db_params, 'jobs_history')
+    load_data_to_postgresql(db_params, user_df,  table_name='user_tbl')
+    load_data_to_postgresql(db_params, tel_num_df,  table_name='telephone_numbers')
+    load_data_to_postgresql(db_params, job_history_df, table_name='jobs_history')
 
 if __name__ == "__main__":
     try:

@@ -3,3 +3,4 @@ delta-spark
 pandas
 sqlalchemy
 psycopg2-binary
+python-dotenv

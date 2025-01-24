@@ -10,6 +10,7 @@ from datetime import datetime
 import pytz
 from delta.tables import DeltaTable
 import psycopg2
+from sqlalchemy import create_engine
 
 logging.basicConfig(level=logging.DEBUG, 
                     format='%(asctime)s - %(levelname)s - %(message)s')
@@ -17,8 +18,8 @@ logger = logging.getLogger(__name__)
 
 base_dir = os.path.dirname(__file__)  
 sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), '../'))
-from services.utils import read_data, path_exists, validate_unique_key, cleanse_timestamp, convert_unix_to_dt,load_to_postgres_via_cursor
-from services.utils import apply_mapping, normalize_columns, clean_is_claimed, extract_filename_without_extension, write_data
+from services.utils import read_data, path_exists, validate_unique_key, cleanse_timestamp, convert_unix_to_dt
+from services.utils import apply_mapping, normalize_columns, extract_filename_without_extension, write_data, clean_is_claimed, load_data_to_postgresql
 
 spark = SparkSession.builder.appName("ProcessETLCSV").getOrCreate()
 
@@ -31,7 +32,8 @@ spark = (SparkSession.builder
 # conf = spark.sparkContext.getConf() 
 
 job_params = { 
-    'input_path': 'src/test.csv', 
+    'input_path': 'src/test.csv',  
+    # 'input_path': '/home/wan/process_csv_json_files/src/test.csv',
     'output_path': 's3a://etl-dev/warehouse/sample-test/test',
     'file_format': 'csv',  #can be changed to json, parquet.. etc.
     'delimiter': ',',  
@@ -50,6 +52,18 @@ db_params = {
 }
 
 
+# db_params = {
+#     'dbname': os.environ.get('DB_NAME'),
+#     'user': os.environ.get('DB_USER'),
+#     'password': os.environ.get('DB_PASSWORD'),
+#     'host': os.environ.get('DB_HOST'),
+#     'port': os.environ.get('DB_PORT'),
+# }
+
+# print(f"DB Name: {os.environ.get('DB_NAME')}")
+# print(f"DB User: {os.environ.get('DB_USER')}")
+
+
 
 def run(*, input_path: str, output_path: str, file_format: str = 'csv', 
         delimiter:str, quote:str, escape:str, multiLine:str ):
@@ -60,8 +74,6 @@ def run(*, input_path: str, output_path: str, file_format: str = 'csv',
     # if path_exists(input_path):
     assert path_exists(input_path), f"Input path {input_path} does not exist."
     logger.info("Input file exists, proceeding with reading data...")
-
-
 
     df = read_data(
     input_path=input_path, 
@@ -99,9 +111,17 @@ def run(*, input_path: str, output_path: str, file_format: str = 'csv',
     df = df.cache()
     df = df.repartition(10).limit(10000) #NOTE: For POC concept 
 
-    window_spec = Window.orderBy(F.col('id'), F.col('created_at'))
+    # window_spec = Window.orderBy(F.col('id'), F.col('created_at'))
+
+    import uuid
+    @F.udf()
+    def gen_uuid():
+        return str(uuid.uuid4())
+
+    from distutils.util import strtobool
+
     mapping = {
-        'uuid': F.lit(F.row_number().over(window_spec)),
+        'uuid': F.lit(gen_uuid()),
         'id': 'id',
         'name': F.trim('name'),
         'address': F.trim(F.regexp_replace(F.col('address'), "\n", " ")),
@@ -110,9 +130,10 @@ def run(*, input_path: str, output_path: str, file_format: str = 'csv',
         'created_at': cleanse_timestamp('created_at').cast(types.TimestampType()),
         'last_login_ori': 'last_login',
         'last_login': convert_unix_to_dt('last_login'),
-        'is_claimed': clean_is_claimed('is_claimed').cast(types.BooleanType()),
+        'is_claimed_ori': 'is_claimed',
+        'is_claimed': clean_is_claimed('is_claimed'),
         'paid_amount': F.col('paid_amount').cast(types.DecimalType(10,2)),
-        'filename': extract_filename_without_extension(F.input_file_name()),
+        # 'filename': extract_filename_without_extension(F.input_file_name()),
         'inserted_date': F.lit(datetime.now(tz=pytz.UTC)),
     }
 
@@ -122,7 +143,7 @@ def run(*, input_path: str, output_path: str, file_format: str = 'csv',
     assert df is not None, "Data mapping failed: The transformed DataFrame is None."
     assert df.count() > 0, "Data mapping failed: The transformed DataFrame is empty."
     
-    # metrics computation
+    # # metrics computation
     src_cnt = df.select('id').count()
     if df.head() is None:
         logger.info('No new data to process, nothing to write.')
@@ -136,6 +157,7 @@ def run(*, input_path: str, output_path: str, file_format: str = 'csv',
     else:
         dest_cnt = df.select('id').count()
         logger.info(f'Total final data records = {dest_cnt}')
+        
 
         # check if data is match before proceeding...
         assert src_cnt == dest_cnt, f"Source count ({src_cnt}) and transformed count ({dest_cnt}) do not match."
@@ -148,15 +170,16 @@ def run(*, input_path: str, output_path: str, file_format: str = 'csv',
             }
         }
         
-        # df.filter((F.col('created_at').isNull()) & (F.col('created_at_src') != 'not a date')).select('created_at_src', 'created_at').show(50, truncate=False)
-        # df.show(5, truncate=False)
-        # df.printSchema()
+    #     # df.filter((F.col('created_at').isNull()) & (F.col('created_at_src') != 'not a date')).select('created_at_src', 'created_at').show(50, truncate=False)
+        df.show(5, truncate=False)
+        df.printSchema()
         logger.info(f"Metrics calculated: {metrics}")
 
 
-        # NOTE: Uncomment to save data into S3 
-        # write_data(df, output_path, storage_format='delta')
-        load_to_postgres_via_cursor(df, db_params, 'test')
+    # #     # NOTE: Uncomment to save data into S3 
+    # #     # write_data(df, output_path, storage_format='delta')
+        load_data_to_postgresql(db_params, df, table_name="test")
+
 
     return metrics
 
@@ -167,3 +190,7 @@ if __name__ == "__main__":
         logger.info("Process completed successfully.")
     except Exception as e:
         logger.error(f"Process failed: {e}")
+
+
+
+

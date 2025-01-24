@@ -1,23 +1,119 @@
 version: '3.8'
 
 services:
+  app:
+    build: .
+    container_name: my-python-app
+    ports:
+      - "8000:8000"  # Update if your app exposes any ports
+    environment:
+      - JAVA_HOME=/usr/lib/jvm/default-java
+      - PATH=$JAVA_HOME/bin:$PATH
+    volumes:
+      - .:/app
+    command: tail -f /dev/null  # Keeps the container running
+
   db:
-    image: postgres:latest
+    image: postgres:13  # Example, you can modify based on your database choice
     container_name: etl_database
     environment:
-      - POSTGRES_USER=etluser
-      - POSTGRES_PASSWORD=etlpassword
-      - POSTGRES_DB=etl_db
-    ports:
-      - "5432:5432"  
+      POSTGRES_USER: etluser
+      POSTGRES_PASSWORD: etlpassword
+      POSTGRES_DB: etl_db
     volumes:
-      - db_data:/var/lib/postgresql/data 
-    networks:
-      - etl_network
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
 
 volumes:
-  db_data:
+  pgdata:
 
-networks:
-  etl_network:
-    driver: bridge
+
+
+# version: '3.8'
+
+# services:
+#   db:
+#     image: postgres:latest
+#     container_name: etl_database
+#     environment:
+#       - POSTGRES_USER=etluser
+#       - POSTGRES_PASSWORD=etlpassword
+#       - POSTGRES_DB=etl_db
+#     ports:
+#       - "5432:5432"  
+#     volumes:
+#       - db_data:/var/lib/postgresql/data 
+#     networks:
+#       - etl_network
+
+#   process-files:
+#     build:
+#       context: .
+#     container_name: process_files_container
+#     networks:
+#       - etl_network
+#     depends_on:
+#       - db
+#     environment:
+#       - PYTHONUNBUFFERED=1  
+#       - JAVA_HOME=/usr/lib/jvm/default-java
+
+# volumes:
+#   db_data:
+
+# networks:
+#   etl_network:
+#     driver: bridge
+
+
+# # version: '3.8'
+
+# # services:
+# #   db:
+# #     image: postgres:latest
+# #     container_name: etl_database
+# #     environment:
+# #       - POSTGRES_USER=etluser
+# #       - POSTGRES_PASSWORD=etlpassword
+# #       - POSTGRES_DB=etl_db
+# #     ports:
+# #       - "5432:5432"  
+# #     volumes:
+# #       - db_data:/var/lib/postgresql/data 
+# #     networks:
+# #       - etl_network
+
+# # volumes:
+# #   db_data:
+
+# # networks:
+# #   etl_network:
+# #     driver: bridge
+
+
+
+# # version: '3.8'
+
+# # services:
+# #   db:
+# #     image: postgres:latest
+# #     container_name: etl_database
+# #     environment:
+# #       POSTGRES_USER: ${DB_USER}
+# #       POSTGRES_PASSWORD: ${DB_PASSWORD}
+# #       POSTGRES_DB: ${DB_NAME}
+# #     ports:
+# #       - "5432:5432"
+# #     volumes:
+# #       - db_data:/var/lib/postgresql/data
+# #     networks:
+# #       - etl_network
+
+# # volumes:
+# #   db_data:
+
+# # networks:
+# #   etl_network:
+# #     driver: bridge
+

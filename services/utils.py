@@ -64,17 +64,25 @@ def validate_unique_key(df: DataFrame, cols):
     if q.count() > 0:
        raise AssertionError("key is not unique") 
     
-@F.udf(returnType=types.StringType())
-def clean_is_claimed(name: str):
-    if name is None:
+@F.udf(returnType=types.BooleanType())
+def clean_is_claimed(value):
+    if value is None:
         return None
+    
     replacements = [
-        ("truee", "True"),
-        ("fal_se", "False"),
-     ]
-    for repl in replacements:
-        name = name.replace(repl[0], repl[1])
-    return name
+        ("truee", "true"),
+        ("fal_se", "false"),
+    ]
+    value = str(value).lower()  
+    for old, new in replacements:
+        value = value.replace(old, new)
+
+    if value == "true":
+        return True
+    elif value == "false":
+        return False
+    return None
+
 
 def apply_mapping(df: DataFrame, mapping: dict, extend: bool=False) -> DataFrame:
     """
@@ -258,11 +266,8 @@ def cleanse_tel_num(col: F.Column) -> F.Column:
     col = F.when(F.length(col) == 10, col).otherwise(F.lit(None))
     return col
 
-#write data to postgres
-def load_to_postgres_via_cursor(spark_df, db_params, table_name: str):
+def load_to_postgres_via_cursor(df, db_params, table_name: str):
     try:
-        pandas_df = spark_df.toPandas()
-        
         engine = create_engine(
             f'postgresql+psycopg2://{db_params["user"]}:{db_params["password"]}@{db_params["host"]}:{db_params["port"]}/{db_params["dbname"]}'
         )
@@ -271,14 +276,20 @@ def load_to_postgres_via_cursor(spark_df, db_params, table_name: str):
             with connection.begin():
                 with connection.connection.cursor() as cursor:
                     temp_table = f"{table_name}_temp"
-                    
                     cursor.execute(f"DROP TABLE IF EXISTS {temp_table};")
-                    
-                    pandas_df.head(0).to_sql(temp_table, connection, index=False, if_exists='replace')
-                    
+
+                    df_pd = df.toPandas()  
+
+                    df_pd.head(0).to_sql(
+                        temp_table,
+                        connection,
+                        index=False,
+                        if_exists='replace'
+                    )
+
                     from io import StringIO
                     buffer = StringIO()
-                    pandas_df.to_csv(buffer, header=False, index=False)
+                    df_pd.to_csv(buffer, header=False, index=False)
                     buffer.seek(0)
 
                     cursor.copy_expert(
@@ -286,8 +297,9 @@ def load_to_postgres_via_cursor(spark_df, db_params, table_name: str):
                     )
 
                     cursor.execute(f"""
-                        DROP TABLE IF EXISTS {table_name};
-                        ALTER TABLE {temp_table} RENAME TO {table_name};
+                        DELETE FROM {table_name};
+                        INSERT INTO {table_name} SELECT * FROM {temp_table};
+                        DROP TABLE {temp_table};
                     """)
 
                     logger.info(f"Data loaded into PostgreSQL table: {table_name}")
@@ -324,3 +336,41 @@ def write_data(df: DataFrame, output_path: str, storage_format: str) -> None:
 #         return ctx
 #     except ValidationError as e:
 #         raise Exception(f"Validation error in context: {e}")
+
+
+def load_data_to_postgresql(db_params, df, table_name, if_exists="replace"):
+    """
+    Loads a Spark DataFrame to a PostgreSQL table.
+
+    Args:
+        db_params (dict): Dictionary containing PostgreSQL connection parameters:
+                          user, password, host, port, and dbname.
+        df (pyspark.sql.DataFrame): The Spark DataFrame to load.
+        table_name (str): The name of the target table in the database.
+        if_exists (str): Behavior if the table already exists.
+                         Options: 'fail', 'replace', 'append'. Default is 'replace'.
+    """
+    try:
+        # Create SQLAlchemy engine
+        engine = create_engine(
+            f'postgresql+psycopg2://{db_params["user"]}:{db_params["password"]}@'
+            f'{db_params["host"]}:{db_params["port"]}/{db_params["dbname"]}'
+        )
+
+        # Convert Spark DataFrame to Pandas DataFrame
+        df_pandas = df.toPandas()
+
+        import pandas as pd
+        # df_pandas = df_pandas.fillna({
+        #     'paid_amount': 0.0,  # Replace NaN in 'paid_amount' with 0.0
+        #     'is_claimed': False, # Replace NaN in 'is_claimed' with False
+        #     'last_login_ori': 0  
+        # })
+
+        # Load data into PostgreSQL table
+        df_pandas.to_sql(table_name, engine, index=False, if_exists=if_exists)
+        logger.info(f"Data successfully loaded into PostgreSQL table '{table_name}'.")
+    
+    except Exception as e:
+        logger.error(f"Failed to load data into PostgreSQL: {e}")
+        raise
